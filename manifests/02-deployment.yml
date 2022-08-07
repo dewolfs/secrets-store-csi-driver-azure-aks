@@ -37,4 +37,4 @@ spec:
             driver: secrets-store.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: "kv-aks-csi-weu-01"
+              secretProviderClass: "azure-kv-aks-csi-weu-01-spc"
