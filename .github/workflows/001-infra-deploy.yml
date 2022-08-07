@@ -1,0 +1,90 @@
+name: 001-infra-deploy
+
+on:
+  workflow_dispatch:
+
+env:
+  LOCATION: "Germany West Central"
+  KV_NAME: "kv-aks-csi-weu-01"
+  RESOURCE_GROUP : "rg-prd-001"
+  AKS_NAME : "aks-prd-001"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  infra-rg:
+    name: infra-rg
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitHub Actions
+        uses: actions/checkout@v2
+        
+      - name: "Az CLI login"
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: "Create resource groups"
+        run: |
+          az group create --location "${{ env.LOCATION }}" --name "${{ env.RESOURCE_GROUP }}"
+            
+  infra-prd:
+    name: infra
+    runs-on: ubuntu-latest
+    needs: infra-rg
+    steps:
+      - name: Checkout GitHub Actions
+        uses: actions/checkout@v2
+
+      - name: "Az CLI login"
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: "Create AKS PRD"
+        run: |
+          az aks create \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "${{ env.AKS_NAME }}" \
+            --location "${{ env.LOCATION }}" \
+            --node-count 1 \
+            --node-vm-size Standard_D2s_v5 \
+            --enable-addons azure-keyvault-secrets-provider \
+            --enable-secret-rotation \
+            --rotation-poll-interval=1m \
+            --enable-managed-identity \
+            --generate-ssh-keys
+
+      - name: "Create key vault"
+        run: |
+          az keyvault create --name "${{ env.KV_NAME }}" --resource-group "${{ env.RESOURCE_GROUP }}" --location "${{ env.LOCATION }}" --enable-rbac-authorization
+
+      - name: "Set RBAC on key vault 1"
+        run: |
+          export IDENTITYGROUPID=$(az ad group show --group "KeyVaultAdmins" --query "id" --output tsv)
+          
+          # Key Vault Administrator role on key vault resource
+          az role assignment create \
+              --role "Key Vault Administrator" \
+              --assignee $IDENTITYGROUPID \
+              --scope "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/"${{ env.RESOURCE_GROUP }}"/providers/Microsoft.KeyVault/vaults/${{ env.KV_NAME }}"
+
+      - name: "Create secrets"
+        run: |
+          az keyvault secret set --name db-user --vault-name "${{ env.KV_NAME }}" --value 'administrator'
+          az keyvault secret set --name db-pass --vault-name "${{ env.KV_NAME }}" --value 'mysupersecretpassword'
+          
+      - name: "Set RBAC on key vault 2"
+        run: |        
+          # Get the principal ID of the user-assigned managed identity created by the add-on
+          export PROVIDER_IDENTITY=$(az identity show --resource-group 'MC_${{ env.RESOURCE_GROUP }}_${{ env.AKS_NAME }}_germanywestcentral' --name 'azurekeyvaultsecretsprovider-${{ env.AKS_NAME }}' --query principalId -o tsv)
+          echo $PROVIDER_IDENTITY
+
+          # Assign Key Vault role to principalId
+          az role assignment create --role 'Key Vault Secrets User' --assignee-object-id $PROVIDER_IDENTITY --assignee-principal-type 'ServicePrincipal' --scope '/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.RESOURCE_GROUP }}/providers/Microsoft.KeyVault/vaults/${{ env.KV_NAME }}'
